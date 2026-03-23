@@ -33,7 +33,7 @@ async function fetchPage(path: string, cookie: string): Promise<string> {
   return text
 }
 
-// ─── HTML table parser ────────────────────────────────────────────────────────
+// ─── Standard table parser (for well-formed tables with <tr> tags) ────────────
 
 function parseTable(html: string): string[][] {
   const rows: string[][] = []
@@ -43,24 +43,34 @@ function parseTable(html: string): string[][] {
   while ((rowMatch = rowRegex.exec(html)) !== null) {
     const cells: string[] = []
     let cellMatch
-    const rowContent = rowMatch[1]
-    while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
-      const text = cellMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
-      cells.push(text)
+    while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
+      cells.push(cellMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim())
     }
     if (cells.length > 0) rows.push(cells)
   }
   return rows
 }
 
-function extractAllTables(html: string): string[] {
-  const tables: string[] = []
-  const tableRegex = /<table[\s\S]*?<\/table>/gi
+// ─── Malformed table parser ───────────────────────────────────────────────────
+// SRM's course table has NO <tr> tags around data rows — just raw <td> sequences.
+// Strategy: extract ALL <td> cell values from the table, then chunk into rows
+// by grouping every N cells (where N = number of columns in header).
+
+function parseMalformedTable(tableHtml: string, colCount: number): string[][] {
+  const cells: string[] = []
+  const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi
   let m
-  while ((m = tableRegex.exec(html)) !== null) {
-    tables.push(m[0])
+  while ((m = cellRegex.exec(tableHtml)) !== null) {
+    const text = m[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+    cells.push(text)
   }
-  return tables
+
+  const rows: string[][] = []
+  for (let i = 0; i < cells.length; i += colCount) {
+    const row = cells.slice(i, i + colCount)
+    if (row.length === colCount) rows.push(row)
+  }
+  return rows
 }
 
 function extractRegNumber(html: string): string {
@@ -69,19 +79,15 @@ function extractRegNumber(html: string): string {
 
 // ─── Attendance + Marks ───────────────────────────────────────────────────────
 //
-// Attendance columns (verified from live screenshot):
-//   0: Course Code  1: Course Title  2: Category  3: Faculty Name
+// Attendance columns (verified):
+//   0: Course Code  1: Course Title  2: Category  3: Faculty
 //   4: Slot  5: Room No  6: Hours Conducted  7: Hours Absent  8: Attn%
-//
-// Marks table — each cell in the test performance column contains text like:
-//   "FT-II / 15.00  11.00"  or  "FT-I / 5.00  4.50"  or  "Abs"
-// We parse each TD cell individually for max robustness.
 
 export async function getAttendanceAndMarks(cookie: string) {
   const html = await fetchPage("My_Attendance", cookie)
   const regNumber = extractRegNumber(html)
 
-  // ── Attendance ──
+  // ── Attendance — this table is well-formed with <tr> tags ──
   const attSection = html.split(`<table style="font-size :16px;" border="1"`)?.[1] ?? ""
   const attHTML = `<table>${attSection.split("</table>")[0]}</table>`
   const attRows = parseTable(attHTML)
@@ -108,39 +114,26 @@ export async function getAttendanceAndMarks(cookie: string) {
     })
   }
 
-  // ── Marks — find the marks table robustly ──
+  // ── Marks — also try standard parser first, fall back to malformed ──
   const courseMap: Record<string, string> = {}
   for (const a of attendance) courseMap[a.courseCode] = a.courseTitle
 
   const marks: any[] = []
 
-  // Strategy: find ALL tables in the marks section, pick the one that has course codes
-  // The marks section is always after the attendance table
-  const afterAtt = html.split(`<table style="font-size :16px;" border="1"`)?.[1] ?? html
-  const allTables = extractAllTables(afterAtt)
+  // Find the marks table
+  const marksSection = html.split(`<table border="1" align="center" cellpadding="1" cellspacing="1">`)?.[1] ?? ""
+  const marksTableHTML = `<table border="1" align="center" cellpadding="1" cellspacing="1">${marksSection.split("</table>")[0]}</table>`
 
-  // Find the marks table — it has rows with course codes in column 0
-  let marksRows: string[][] = []
-  for (const tbl of allTables) {
-    const rows = parseTable(tbl)
-    // Marks table: col 0 = course code, col 1 = course type
-    // Check if any row looks like a marks row
-    const hasMarksRows = rows.some(r =>
-      r.length >= 2 && r[0]?.match(/^\d{2}[A-Z]/) && r[1]?.match(/Theory|Practical/i)
-    )
-    // Also accept header + data rows
-    const hasHeader = rows.some(r => r[0] === "Course Code")
-    if (hasMarksRows || (hasHeader && rows.length > 1)) {
-      marksRows = rows
-      break
-    }
-  }
+  // Try standard parser first
+  let marksRows = parseTable(marksTableHTML)
 
-  // Fallback: original split method
-  if (marksRows.length === 0) {
-    const marksSection = html.split(`<table border="1" align="center" cellpadding="1" cellspacing="1">`)?.[1] ?? ""
-    const marksHTML = `<table>${marksSection.split("</table>")[0]}</table>`
-    marksRows = parseTable(marksHTML)
+  // If standard parser only finds header row (or nothing), use malformed parser
+  const validMarksRows = marksRows.filter(r => r[0]?.match(/^\d{2}[A-Z]/))
+  if (validMarksRows.length === 0) {
+    // Count columns from header
+    const headerRow = marksRows.find(r => r[0] === "Course Code") ?? []
+    const colCount  = headerRow.length > 0 ? headerRow.length : 3
+    marksRows = parseMalformedTable(marksTableHTML, colCount)
   }
 
   for (const row of marksRows) {
@@ -148,23 +141,17 @@ export async function getAttendanceAndMarks(cookie: string) {
     const code = row[0]?.trim()
     const type = row[1]?.trim()
     if (!code || !type) continue
-    if (!code.match(/^\d{2}[A-Z]/)) continue  // skip header row
+    if (!code.match(/^\d{2}[A-Z]/)) continue
 
-    // Parse tests from all remaining cells
-    // Each test is formatted as "NAME / MAX  SCORED" or just "Abs"
-    // Try multiple regex patterns to handle all SRM test name formats:
-    //   FT-I, FT-II, CT-I, CT-II, Model Exam, Cycle Test 1, etc.
     const testRaw = row.slice(2).join(" ")
     const tests: any[] = []
-
-    // Pattern 1: "TESTNAME / MAX SCORED" — handles any test name with letters/numbers/spaces/hyphens
-    const testRegex1 = /([A-Za-z][A-Za-z0-9\s\-]*?)\s*\/\s*([\d.]+)\s+([\d.]+|Abs)/g
+    // Match any test format: "FT-II / 15.00  11" or "CT-I / 50.00  45.5"
+    const testRegex = /([A-Za-z][A-Za-z0-9\s\-]*?)\s*\/\s*([\d.]+)\s+([\d.]+|Abs)/g
     let tm
-    while ((tm = testRegex1.exec(testRaw)) !== null) {
+    while ((tm = testRegex.exec(testRaw)) !== null) {
       const testName = tm[1].trim()
       const total    = parseFloat(parseFloat_(tm[2]).toFixed(2))
       const scored   = tm[3] === "Abs" ? "Abs" : parseFloat(parseFloat_(tm[3]).toFixed(2))
-      // Avoid duplicates
       if (testName && total > 0 && !tests.find(t => t.test === testName)) {
         tests.push({ test: testName, scored, total })
       }
@@ -173,7 +160,7 @@ export async function getAttendanceAndMarks(cookie: string) {
     const overall = tests.reduce(
       (acc, t) => ({
         scored: acc.scored + (t.scored === "Abs" ? 0 : t.scored),
-        total:  acc.total  + t.total,
+        total:  acc.total + t.total,
       }),
       { scored: 0, total: 0 }
     )
@@ -195,42 +182,36 @@ export async function getAttendanceAndMarks(cookie: string) {
 
 // ─── Courses ──────────────────────────────────────────────────────────────────
 //
-// Course columns (verified from live screenshot):
+// CRITICAL: SRM's course table has NO <tr> tags around data rows.
+// Must use parseMalformedTable with 11 columns.
+//
+// Columns (verified from debug output + screenshot):
 //   0: S.No  1: Course Code  2: Course Title  3: Credit
-//   4: Regn Type  5: Category  6: Course Type  7: Faculty  8: Slot  9: Room  10: AY
+//   4: Regn. Type  5: Category  6: Course Type  7: Faculty
+//   8: Slot  9: Room No  10: Academic Year
 
 export async function getCourses(cookie: string) {
   const html = await fetchPage("My_Time_Table_2023_24", cookie)
   const regNumber = extractRegNumber(html)
 
+  // Find the course table — class="course_tbl"
   let tableHTML = ""
-
   if (html.includes('class="course_tbl"')) {
     const section = html.split('class="course_tbl"')[1] ?? ""
-    tableHTML = `<table>${section.split("</table>")[0]}</table>`
+    tableHTML = `<table class="course_tbl"${section.split("</table>")[0]}</table>`
   } else if (html.includes("class='course_tbl'")) {
     const section = html.split("class='course_tbl'")[1] ?? ""
-    tableHTML = `<table>${section.split("</table>")[0]}</table>`
-  } else {
-    // Scan all tables, find the one with course code patterns
-    const allTables = extractAllTables(html)
-    for (const tbl of allTables) {
-      const rows = parseTable(tbl)
-      const dataRows = rows.filter(r => r.length >= 10 && r[1]?.match(/^\d{2}[A-Z]/))
-      if (dataRows.length > 0) {
-        tableHTML = tbl
-        break
-      }
-    }
+    tableHTML = `<table class='course_tbl'${section.split("</table>")[0]}</table>`
   }
 
-  const rows = parseTable(tableHTML)
+  // Use malformed table parser — 11 columns, skipping S.No (col 0)
+  const rows = parseMalformedTable(tableHTML, 11)
   const courses: any[] = []
 
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]
+  for (const row of rows) {
     if (row.length < 10) continue
     const code = row[1]?.trim()
+    // Skip header row and invalid rows
     if (!code || !code.match(/^\d{2}[A-Z]/)) continue
 
     const slot = row[8].replace(/-$/, "").trim()
@@ -267,8 +248,8 @@ export async function getUser(cookie: string) {
       const key = row[i].replace(":", "").trim()
       const val = row[i + 1]?.trim() ?? ""
       switch (key) {
-        case "Name":    user.name    = val; break
-        case "Program": user.program = val; break
+        case "Name":     user.name     = val; break
+        case "Program":  user.program  = val; break
         case "Semester": user.semester = parseInt_(val); break
         case "Department": {
           const parts    = val.split("-")
@@ -277,7 +258,7 @@ export async function getUser(cookie: string) {
           break
         }
         case "Combo / Batch":
-          // "1/1" → "1", "2/1" → "2"
+          // "1/1" → "1", "2/1" → "2" — take first digit only
           user.batch = (val.match(/\d/) ?? ["1"])[0]
           break
       }
