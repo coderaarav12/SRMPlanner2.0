@@ -193,15 +193,36 @@ export default {
             const hex   = end !== -1 ? after.substring(0, end) : after.substring(0, 3000)
             decoded = hex.replace(/\\x([0-9A-Fa-f]{2})/g, (_:any, h:string) => String.fromCharCode(parseInt(h, 16))).substring(0, 4000)
           }
+          // Get full decoded content
+          let fullDecoded = ""
+          if (sanitizeIdx !== -1) {
+            const after2 = raw.substring(sanitizeIdx + 11)
+            const end2   = after2.indexOf("\')")
+            const hex2   = end2 !== -1 ? after2.substring(0, end2) : after2
+            fullDecoded  = hex2.replace(/\\x([0-9A-Fa-f]{2})/g, (_:any, h:string) => String.fromCharCode(parseInt(h, 16)))
+          }
+          // Find the ACTUAL table tag with course_tbl class
+          const tblClassIdx = fullDecoded.indexOf('class="course_tbl"')
+          const tblClassIdx2 = fullDecoded.indexOf("class='course_tbl'")
+          const actualIdx = tblClassIdx !== -1 ? tblClassIdx : tblClassIdx2
+          // Find all table opening tags to understand structure
+          const tableMatches: string[] = []
+          const tReg = /<table[^>]{0,200}>/gi
+          let tM
+          const tempStr = fullDecoded.substring(0, 10000)
+          while ((tM = tReg.exec(tempStr)) !== null) {
+            tableMatches.push(tM[0].substring(0, 150))
+          }
           return jsonResponse({
             httpStatus: resp.status,
-            rawLength: raw.length,
-            sanitizeFound: sanitizeIdx !== -1,
-            courseTblFoundRaw: courseIdx !== -1,
-            courseTblFoundDecoded: decoded.indexOf("course_tbl") !== -1,
-            rawStart: raw.substring(0, 300),
-            decodedStart: decoded.substring(0, 500),
-            courseTblArea: decoded.indexOf("course_tbl") !== -1 ? decoded.substring(Math.max(0, decoded.indexOf("course_tbl")-100), decoded.indexOf("course_tbl")+300) : "NOT FOUND",
+            decodedLength: fullDecoded.length,
+            courseTblClassFound: actualIdx !== -1,
+            courseTblClassAt: actualIdx,
+            courseTblArea: actualIdx !== -1
+              ? fullDecoded.substring(actualIdx - 20, actualIdx + 800)
+              : "NOT FOUND",
+            allTableTags: tableMatches,
+            decodedChars3000to5000: fullDecoded.substring(3000, 5000),
           }, 200, origin)
         } catch(e: any) {
           return jsonResponse({ error: e.message }, 500, origin)
