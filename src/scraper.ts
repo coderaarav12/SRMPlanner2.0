@@ -53,7 +53,6 @@ function parseTable(html: string): string[][] {
   return rows
 }
 
-// Extract all <table>...</table> blocks from HTML
 function extractAllTables(html: string): string[] {
   const tables: string[] = []
   const tableRegex = /<table[\s\S]*?<\/table>/gi
@@ -70,9 +69,13 @@ function extractRegNumber(html: string): string {
 
 // ─── Attendance + Marks ───────────────────────────────────────────────────────
 //
-// Attendance columns (verified from live page):
-//   0: Course Code  1: Course Title  2: Category  3: Faculty
+// Attendance columns (verified from live screenshot):
+//   0: Course Code  1: Course Title  2: Category  3: Faculty Name
 //   4: Slot  5: Room No  6: Hours Conducted  7: Hours Absent  8: Attn%
+//
+// Marks table — each cell in the test performance column contains text like:
+//   "FT-II / 15.00  11.00"  or  "FT-I / 5.00  4.50"  or  "Abs"
+// We parse each TD cell individually for max robustness.
 
 export async function getAttendanceAndMarks(cookie: string) {
   const html = await fetchPage("My_Attendance", cookie)
@@ -91,7 +94,7 @@ export async function getAttendanceAndMarks(cookie: string) {
 
     const conducted = parseFloat_(row[6])
     const absent    = parseFloat_(row[7])
-    const pct = conducted > 0 ? ((conducted - absent) / conducted) * 100 : 0
+    const pct       = conducted > 0 ? ((conducted - absent) / conducted) * 100 : 0
 
     attendance.push({
       courseCode:           code.replace(/Regular/gi, "").trim(),
@@ -105,15 +108,41 @@ export async function getAttendanceAndMarks(cookie: string) {
     })
   }
 
-  // ── Marks ──
-  const marksSection = html.split(`<table border="1" align="center" cellpadding="1" cellspacing="1">`)?.[1] ?? ""
-  const marksHTML = `<table>${marksSection.split("</table>")[0]}</table>`
-  const marksRows = parseTable(marksHTML)
-
+  // ── Marks — find the marks table robustly ──
   const courseMap: Record<string, string> = {}
   for (const a of attendance) courseMap[a.courseCode] = a.courseTitle
 
   const marks: any[] = []
+
+  // Strategy: find ALL tables in the marks section, pick the one that has course codes
+  // The marks section is always after the attendance table
+  const afterAtt = html.split(`<table style="font-size :16px;" border="1"`)?.[1] ?? html
+  const allTables = extractAllTables(afterAtt)
+
+  // Find the marks table — it has rows with course codes in column 0
+  let marksRows: string[][] = []
+  for (const tbl of allTables) {
+    const rows = parseTable(tbl)
+    // Marks table: col 0 = course code, col 1 = course type
+    // Check if any row looks like a marks row
+    const hasMarksRows = rows.some(r =>
+      r.length >= 2 && r[0]?.match(/^\d{2}[A-Z]/) && r[1]?.match(/Theory|Practical/i)
+    )
+    // Also accept header + data rows
+    const hasHeader = rows.some(r => r[0] === "Course Code")
+    if (hasMarksRows || (hasHeader && rows.length > 1)) {
+      marksRows = rows
+      break
+    }
+  }
+
+  // Fallback: original split method
+  if (marksRows.length === 0) {
+    const marksSection = html.split(`<table border="1" align="center" cellpadding="1" cellspacing="1">`)?.[1] ?? ""
+    const marksHTML = `<table>${marksSection.split("</table>")[0]}</table>`
+    marksRows = parseTable(marksHTML)
+  }
+
   for (const row of marksRows) {
     if (row.length < 2) continue
     const code = row[0]?.trim()
@@ -121,16 +150,24 @@ export async function getAttendanceAndMarks(cookie: string) {
     if (!code || !type) continue
     if (!code.match(/^\d{2}[A-Z]/)) continue  // skip header row
 
+    // Parse tests from all remaining cells
+    // Each test is formatted as "NAME / MAX  SCORED" or just "Abs"
+    // Try multiple regex patterns to handle all SRM test name formats:
+    //   FT-I, FT-II, CT-I, CT-II, Model Exam, Cycle Test 1, etc.
     const testRaw = row.slice(2).join(" ")
     const tests: any[] = []
-    const testRegex = /([A-Z]+-[IVX]+)\s*\/\s*([\d.]+)\s+([\d.]+|Abs)/g
+
+    // Pattern 1: "TESTNAME / MAX SCORED" — handles any test name with letters/numbers/spaces/hyphens
+    const testRegex1 = /([A-Za-z][A-Za-z0-9\s\-]*?)\s*\/\s*([\d.]+)\s+([\d.]+|Abs)/g
     let tm
-    while ((tm = testRegex.exec(testRaw)) !== null) {
-      tests.push({
-        test:   tm[1],
-        scored: tm[3] === "Abs" ? "Abs" : parseFloat(parseFloat_(tm[3]).toFixed(2)),
-        total:  parseFloat(parseFloat_(tm[2]).toFixed(2)),
-      })
+    while ((tm = testRegex1.exec(testRaw)) !== null) {
+      const testName = tm[1].trim()
+      const total    = parseFloat(parseFloat_(tm[2]).toFixed(2))
+      const scored   = tm[3] === "Abs" ? "Abs" : parseFloat(parseFloat_(tm[3]).toFixed(2))
+      // Avoid duplicates
+      if (testName && total > 0 && !tests.find(t => t.test === testName)) {
+        tests.push({ test: testName, scored, total })
+      }
     }
 
     const overall = tests.reduce(
@@ -161,32 +198,24 @@ export async function getAttendanceAndMarks(cookie: string) {
 // Course columns (verified from live screenshot):
 //   0: S.No  1: Course Code  2: Course Title  3: Credit
 //   4: Regn Type  5: Category  6: Course Type  7: Faculty  8: Slot  9: Room  10: AY
-//
-// Strategy: try multiple ways to find the course table since class name may vary.
 
 export async function getCourses(cookie: string) {
   const html = await fetchPage("My_Time_Table_2023_24", cookie)
   const regNumber = extractRegNumber(html)
 
-  // Try multiple split strategies to find the course table
   let tableHTML = ""
 
-  // Strategy 1: original class name
   if (html.includes('class="course_tbl"')) {
     const section = html.split('class="course_tbl"')[1] ?? ""
     tableHTML = `<table>${section.split("</table>")[0]}</table>`
-  }
-  // Strategy 2: single-quote class name variant
-  else if (html.includes("class='course_tbl'")) {
+  } else if (html.includes("class='course_tbl'")) {
     const section = html.split("class='course_tbl'")[1] ?? ""
     tableHTML = `<table>${section.split("</table>")[0]}</table>`
-  }
-  // Strategy 3: scan ALL tables, find the one with course code patterns
-  else {
+  } else {
+    // Scan all tables, find the one with course code patterns
     const allTables = extractAllTables(html)
     for (const tbl of allTables) {
       const rows = parseTable(tbl)
-      // A course table has many rows and the second column of data rows looks like a course code
       const dataRows = rows.filter(r => r.length >= 10 && r[1]?.match(/^\d{2}[A-Z]/))
       if (dataRows.length > 0) {
         tableHTML = tbl
@@ -202,7 +231,7 @@ export async function getCourses(cookie: string) {
     const row = rows[i]
     if (row.length < 10) continue
     const code = row[1]?.trim()
-    if (!code || !code.match(/^\d{2}[A-Z]/)) continue  // skip header
+    if (!code || !code.match(/^\d{2}[A-Z]/)) continue
 
     const slot = row[8].replace(/-$/, "").trim()
     courses.push({
@@ -224,8 +253,6 @@ export async function getCourses(cookie: string) {
 }
 
 // ─── User ─────────────────────────────────────────────────────────────────────
-//
-// Combo/Batch from SRM is "1/1" → take first digit only.
 
 export async function getUser(cookie: string) {
   const html = await fetchPage("My_Time_Table_2023_24", cookie)
@@ -250,7 +277,7 @@ export async function getUser(cookie: string) {
           break
         }
         case "Combo / Batch":
-          // "1/1" → "1", "2/1" → "2" — take first digit only
+          // "1/1" → "1", "2/1" → "2"
           user.batch = (val.match(/\d/) ?? ["1"])[0]
           break
       }
