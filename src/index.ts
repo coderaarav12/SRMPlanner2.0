@@ -170,59 +170,41 @@ export default {
       case "/api/calendar":
         return jsonResponse({ calendar: session.calendar }, 200, origin)
 
-      case "/api/debug": {
+      case "/api/debug2": {
         try {
-          const BASE = "https://academia.srmist.edu.in/srm_university/academia-academic-services/page"
-          const resp = await fetch(`${BASE}/My_Time_Table_2023_24`, {
+          const UA2 = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+          const BASE2 = "https://academia.srmist.edu.in/srm_university/academia-academic-services/page"
+          const resp = await fetch(BASE2 + "/My_Time_Table_2023_24", {
             headers: {
               Accept: "*/*",
               "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
               "X-Requested-With": "XMLHttpRequest",
-              "User-Agent": "Mozilla/5.0",
+              "User-Agent": UA2,
               Referer: "https://academia.srmist.edu.in/",
               Cookie: session.cookies,
             },
           })
           const raw = await resp.text()
-          const sanitizeIdx = raw.indexOf(".sanitize('")
-          const courseIdx   = raw.indexOf("course_tbl")
+          // Decode hex
+          const sIdx = raw.indexOf(".sanitize('" )
           let decoded = ""
-          if (sanitizeIdx !== -1) {
-            const after = raw.substring(sanitizeIdx + 11)
-            const end   = after.indexOf("\')")
-            const hex   = end !== -1 ? after.substring(0, end) : after.substring(0, 3000)
-            decoded = hex.replace(/\\x([0-9A-Fa-f]{2})/g, (_:any, h:string) => String.fromCharCode(parseInt(h, 16))).substring(0, 4000)
+          if (sIdx !== -1) {
+            const after = raw.substring(sIdx + 11)
+            const eIdx  = after.indexOf("')")
+            const hex   = eIdx !== -1 ? after.substring(0, eIdx) : after
+            decoded = hex.replace(/\x([0-9A-Fa-f]{2})/g, (_: any, h: string) => String.fromCharCode(parseInt(h, 16)))
           }
-          // Get full decoded content
-          let fullDecoded = ""
-          if (sanitizeIdx !== -1) {
-            const after2 = raw.substring(sanitizeIdx + 11)
-            const end2   = after2.indexOf("\')")
-            const hex2   = end2 !== -1 ? after2.substring(0, end2) : after2
-            fullDecoded  = hex2.replace(/\\x([0-9A-Fa-f]{2})/g, (_:any, h:string) => String.fromCharCode(parseInt(h, 16)))
-          }
-          // Find the ACTUAL table tag with course_tbl class
-          const tblClassIdx = fullDecoded.indexOf('class="course_tbl"')
-          const tblClassIdx2 = fullDecoded.indexOf("class='course_tbl'")
-          const actualIdx = tblClassIdx !== -1 ? tblClassIdx : tblClassIdx2
-          // Find all table opening tags to understand structure
-          const tableMatches: string[] = []
-          const tReg = /<table[^>]{0,200}>/gi
-          let tM
-          const tempStr = fullDecoded.substring(0, 10000)
-          while ((tM = tReg.exec(tempStr)) !== null) {
-            tableMatches.push(tM[0].substring(0, 150))
-          }
+          // Find course_tbl and extract 2000 chars after it
+          const ctIdx = decoded.indexOf("class=\"course_tbl\"")
+          const ctIdx2 = decoded.indexOf("class='course_tbl'")
+          const ctIdx3 = decoded.indexOf("course_tbl")
+          const useIdx = ctIdx !== -1 ? ctIdx : ctIdx2 !== -1 ? ctIdx2 : ctIdx3
+          // Get 3000 chars from the table start
+          const tableArea = useIdx !== -1 ? decoded.substring(useIdx - 50, useIdx + 3000) : "NOT FOUND"
           return jsonResponse({
-            httpStatus: resp.status,
-            decodedLength: fullDecoded.length,
-            courseTblClassFound: actualIdx !== -1,
-            courseTblClassAt: actualIdx,
-            courseTblArea: actualIdx !== -1
-              ? fullDecoded.substring(actualIdx - 20, actualIdx + 800)
-              : "NOT FOUND",
-            allTableTags: tableMatches,
-            decodedChars3000to5000: fullDecoded.substring(3000, 5000),
+            decodedLen: decoded.length,
+            courseTblAt: useIdx,
+            tableArea,
           }, 200, origin)
         } catch(e: any) {
           return jsonResponse({ error: e.message }, 500, origin)
