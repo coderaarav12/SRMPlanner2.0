@@ -170,6 +170,44 @@ export default {
       case "/api/calendar":
         return jsonResponse({ calendar: session.calendar }, 200, origin)
 
+      case "/api/debug": {
+        try {
+          const BASE = "https://academia.srmist.edu.in/srm_university/academia-academic-services/page"
+          const resp = await fetch(`${BASE}/My_Time_Table_2023_24`, {
+            headers: {
+              Accept: "*/*",
+              "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+              "X-Requested-With": "XMLHttpRequest",
+              "User-Agent": "Mozilla/5.0",
+              Referer: "https://academia.srmist.edu.in/",
+              Cookie: session.cookies,
+            },
+          })
+          const raw = await resp.text()
+          const sanitizeIdx = raw.indexOf(".sanitize('")
+          const courseIdx   = raw.indexOf("course_tbl")
+          let decoded = ""
+          if (sanitizeIdx !== -1) {
+            const after = raw.substring(sanitizeIdx + 11)
+            const end   = after.indexOf("\')")
+            const hex   = end !== -1 ? after.substring(0, end) : after.substring(0, 3000)
+            decoded = hex.replace(/\\x([0-9A-Fa-f]{2})/g, (_:any, h:string) => String.fromCharCode(parseInt(h, 16))).substring(0, 4000)
+          }
+          return jsonResponse({
+            httpStatus: resp.status,
+            rawLength: raw.length,
+            sanitizeFound: sanitizeIdx !== -1,
+            courseTblFoundRaw: courseIdx !== -1,
+            courseTblFoundDecoded: decoded.indexOf("course_tbl") !== -1,
+            rawStart: raw.substring(0, 300),
+            decodedStart: decoded.substring(0, 500),
+            courseTblArea: decoded.indexOf("course_tbl") !== -1 ? decoded.substring(Math.max(0, decoded.indexOf("course_tbl")-100), decoded.indexOf("course_tbl")+300) : "NOT FOUND",
+          }, 200, origin)
+        } catch(e: any) {
+          return jsonResponse({ error: e.message }, 500, origin)
+        }
+      }
+
       default:
         return jsonResponse({ error: "Not found" }, 404, origin)
     }
