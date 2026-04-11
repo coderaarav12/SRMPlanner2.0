@@ -6,3 +6,11 @@ compatibility_flags = ["nodejs_compat"]
 [[kv_namespaces]]
 binding = "SESSIONS"
 id = "29fd27cbfe2b4a52b281f813349a9cd0"
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
